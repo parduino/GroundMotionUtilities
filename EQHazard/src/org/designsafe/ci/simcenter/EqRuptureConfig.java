@@ -4,6 +4,7 @@
 package org.designsafe.ci.simcenter;
 
 import java.util.ArrayList;
+import java.util.Map;
 
 import com.google.gson.annotations.SerializedName;
 
@@ -19,6 +20,12 @@ public class EqRuptureConfig
 	
 	@SerializedName("Magnitude")
 	private double	m_Magnitude;
+
+	@SerializedName("Probability")
+	private Double	m_Probability = null;
+	
+	@SerializedName("MeanAnnualRate")
+	private Double	m_MeanAnnualRate = null;
 	
 	@SerializedName("Location")
 	private RuptureLocation	m_Location;
@@ -40,6 +47,19 @@ public class EqRuptureConfig
 	
 	@SerializedName("Surface")
 	private ArrayList<RuptureLocation> m_Surface;
+	
+	@SerializedName("ExportGeoJson")
+	private Boolean m_exportGeoJson = null;
+	
+	@SerializedName("MaxDistance")
+	private Double m_maxDistance = null;
+	
+	@SerializedName("MaxSources")
+	private Integer m_maxSources = null;
+	
+	@SerializedName("Parameters")
+	private Map<String, Object> m_parameters = null;
+	
 	
 	public EqRuptureConfig(RuptureLocation location, double magnitude, double averageDip, double averageRake)
 	{
@@ -104,11 +124,28 @@ public class EqRuptureConfig
 		return this.m_RuptureIndex;
 	}
 	
-	public void SetRupture(double magnitude,  double averageDip, double averageRake,  ArrayList<RuptureLocation> surface)
+	public double MaxDistance()
+	{
+		return this.m_maxDistance;
+	}
+	
+	public int MaxSources()
+	{
+		return this.m_maxSources;
+	}
+	
+	public Map<String, Object> Parameters()
+	{
+		return this.m_parameters;
+	}
+	
+	public void SetRupture(double magnitude,  double averageDip, double averageRake, double probability, double meanAnnualRate,  ArrayList<RuptureLocation> surface)
 	{
 		this.m_Magnitude = magnitude;
 		this.m_AverageDip = averageDip;
 		this.m_AverageRake = averageRake;
 		this.m_Surface = surface;
+		this.m_Probability = probability;
+		this.m_MeanAnnualRate = meanAnnualRate;
 	}
 }

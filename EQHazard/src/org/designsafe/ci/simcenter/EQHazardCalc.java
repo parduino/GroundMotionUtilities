@@ -1,18 +1,27 @@
 package org.designsafe.ci.simcenter;
 
+import java.awt.geom.Point2D;
 import java.io.*;
 import java.lang.reflect.*;
 import java.nio.file.Paths;
 import java.util.*;
 
+import javax.swing.JOptionPane;
+
+import org.apache.commons.lang3.ArrayUtils;
 import org.opensha.commons.data.*;
 import org.opensha.commons.data.siteData.*;
+import org.opensha.commons.exceptions.ParameterException;
+import org.opensha.commons.data.function.*;
 import org.opensha.commons.geo.*;
 import org.opensha.commons.param.*;
 import org.opensha.commons.param.Parameter;
 import org.opensha.commons.param.constraint.ParameterConstraint;
 import org.opensha.commons.param.event.*;
 import org.opensha.commons.util.*;
+import org.opensha.nshmp2.imr.NSHMP08_SUB_Slab;
+import org.opensha.nshmp2.imr.impl.AB2003_AttenRel;
+import org.opensha.nshmp2.imr.impl.YoungsEtAl_1997_AttenRel;
 import org.opensha.sha.earthquake.*;
 import org.opensha.sha.earthquake.param.*;
 import org.opensha.sha.earthquake.rupForecastImpl.Frankel02.*;
@@ -21,13 +30,16 @@ import org.opensha.sha.earthquake.rupForecastImpl.WGCEP_UCERF1.*;
 import org.opensha.sha.earthquake.rupForecastImpl.WGCEP_UCERF_2_Final.*;
 import org.opensha.sha.earthquake.rupForecastImpl.WGCEP_UCERF_2_Final.MeanUCERF2.*;
 import org.opensha.sha.faultSurface.*;
+import org.opensha.sha.gui.infoTools.IMT_Info;
 import org.opensha.sha.imr.*;
 import org.opensha.sha.imr.attenRelImpl.*;
 import org.opensha.sha.imr.attenRelImpl.ngaw2.*;
 import org.opensha.sha.imr.attenRelImpl.ngaw2.NGAW2_Wrappers.*;
 import org.opensha.sha.imr.param.IntensityMeasureParams.*;
 import org.opensha.sha.imr.param.OtherParams.*;
+import org.opensha.sha.imr.param.SiteParams.Vs30_Param;
 import org.opensha.sha.util.*;
+import org.opensha.sha.calc.*;
 
 import com.google.common.base.*;
 import com.google.common.io.*;
@@ -47,7 +59,6 @@ public class EQHazardCalc implements ParameterChangeWarningListener {
 		InitSiteDataProviders();
 	}
 	
-	@SuppressWarnings("deprecation")
 	private void MapIMRs()
 	{
 		imrMap = new HashMap<String, String>();
@@ -65,16 +76,16 @@ public class EQHazardCalc implements ParameterChangeWarningListener {
 		imrMap.put(AS_2008_AttenRel.NAME, AS_2008_AttenRel.class.getName());
 		imrMap.put(CY_2008_AttenRel.NAME, CY_2008_AttenRel.class.getName());
 		
-		imrMap.put(BA_2006_AttenRel.NAME, BA_2006_AttenRel.class.getName());
-		imrMap.put(CY_2006_AttenRel.NAME, CY_2006_AttenRel.class.getName());
-		imrMap.put(CB_2006_AttenRel.NAME, CB_2006_AttenRel.class.getName());
 		
 		imrMap.put(AS_1997_AttenRel.NAME, AS_1997_AttenRel.class.getName());
 		imrMap.put(BJF_1997_AttenRel.NAME, BJF_1997_AttenRel.class.getName());
 		imrMap.put(Campbell_1997_AttenRel.NAME, Campbell_1997_AttenRel.class.getName());
 		imrMap.put(CB_2003_AttenRel.NAME, CB_2003_AttenRel.class.getName());
 		imrMap.put(Field_2000_AttenRel.NAME, Field_2000_AttenRel.class.getName());
-		
+		imrMap.put(AB2003_AttenRel.NAME, AB2003_AttenRel.class.getName());
+		imrMap.put(YoungsEtAl_1997_AttenRel.NAME, YoungsEtAl_1997_AttenRel.class.getName());
+		imrMap.put("Zhao Et Al. (2006) - Intraslab", ZhaoEtAl_2006_AttenRel.class.getName());
+
 		//TODO add the rest of IMRs
 
 	}
@@ -98,26 +109,70 @@ public class EQHazardCalc implements ParameterChangeWarningListener {
 			return;
 		}		
 	
+
 		EQHazardCalc calc = new EQHazardCalc();
+		
 		String jsonCfgPath = args[0];
 		File cfgFile = new File(jsonCfgPath);
 		
 		String cfg = "";
-		try {
+		try 
+		{
 			cfg = Files.toString(cfgFile, Charsets.UTF_8);
-		} catch (IOException e) {
-			System.out.print(e.getMessage());
-			System.exit(-1);
+		}
+		catch (IOException e) 
+		{
+			e.printStackTrace();
+			System.err.println(ErrorCode.INPUT_FILE_MISSING);
+			System.exit(ErrorCode.INPUT_FILE_MISSING.getCode());
 		}
 		
 		Gson gson = new GsonBuilder().create();
-		EQHazardConfig scenarioConfig = gson.fromJson(cfg, EQHazardConfig.class);
+		EQHazardConfig config = gson.fromJson(cfg, EQHazardConfig.class);
 		try {
-			calc.PerformSHA(scenarioConfig);
+				
+			if(config.getType() == ConfigType.Scenario)
+				calc.PerformSHA(config);
+			else if(config.getType() == ConfigType.UHS)
+				calc.ComputeUHS(config);
+			else if(config.getType() == ConfigType.ERFEXPORTER)
+			{
+				SiteConfig siteConfig = config.GetSiteConfig();
+				if (!siteConfig.Type().equalsIgnoreCase("SingleLocation"))
+				{
+					System.err.println("Only single location sites are supported for ERF export!");
+					System.exit(ErrorCode.INVALID_INPUT.getCode());
+				}
+				EqRuptureConfig rupConfig = config.GetRuptureConfig();
+				ERF erf = calc.getERF(rupConfig.RuptureForecast(), false);
+				if(erf == null)
+				{
+					System.err.println(ErrorCode.INVALID_ERF);
+					System.exit(ErrorCode.INVALID_ERF.getCode());
+				}
+				
+				Map<String, Object> erfParams = rupConfig.Parameters();
+				if(erfParams != null)
+					for (Map.Entry<String,Object> param : erfParams.entrySet())
+						erf.setParameter(param.getKey(), param.getValue());
+
+				erf.updateForecast();					
+					
+				SiteLocation siteLocation = siteConfig.Location();
+				Location location = new Location(siteLocation.Latitude(), siteLocation.Longitude());
+				ERFExporter.ExportToGeoJson(erf, args[1], rupConfig.MaxDistance(), location, rupConfig.MaxSources());
+				
+				System.exit(0);
+			}
 		}
 		catch (Exception e) {
-			System.err.print(e.getMessage());
-			System.exit(-2);
+			e.printStackTrace();
+			String message = e.getMessage();
+			if(message != null && !message.isEmpty())				
+				System.err.println(message);
+			
+			System.err.println(ErrorCode.UNKNOWN_ERROR);
+			System.exit(ErrorCode.UNKNOWN_ERROR.getCode());
 		}
 		
 		String outFilePath = args[1];
@@ -125,7 +180,9 @@ public class EQHazardCalc implements ParameterChangeWarningListener {
 		String directory = outFile.getAbsoluteFile().getParent();
 		String file = outFile.getName();
 
-		calc.WriteOutputs(scenarioConfig, directory, file);
+		calc.WriteOutputs(config, directory, file);
+		
+		System.exit(0);
 	}
 
 	@Override
@@ -143,7 +200,14 @@ public class EQHazardCalc implements ParameterChangeWarningListener {
 	{
 		GMPEConfig GMPECfg = scenarioConfig.GetGMPEConfig();
 		ScalarIMR imr = CreateIMRInstance(GMPECfg.Type());
-		ParameterList ims =imr.getSupportedIntensityMeasures();
+		
+		if (imr == null) 
+		{
+			System.err.println(ErrorCode.INVALID_IMR);
+			System.exit(ErrorCode.INVALID_IMR.getCode());
+		}
+		
+		ParameterList ims = imr.getSupportedIntensityMeasures();
 		SA_Param saParam = (SA_Param)ims.getParameter(SA_Param.NAME);
 		double[] supportedPeriods = saParam.getPeriodParam().getPeriods();
 		Arrays.sort(supportedPeriods);
@@ -165,14 +229,26 @@ public class EQHazardCalc implements ParameterChangeWarningListener {
 		{
 		    System.out.print("Creating ERF...");
 			long erfStartTime = System.currentTimeMillis();
-			eqRup = getEqRuptureFromERF(eqRupCfg);
+			TimeSpan timeSpan = new TimeSpan(TimeSpan.NONE, TimeSpan.YEARS);
+			eqRup = getEqRuptureFromERF(eqRupCfg, timeSpan);
 			long erfStopTime = System.currentTimeMillis();
 		    long erfElapsedTime = erfStopTime - erfStartTime;
 		    System.out.println("[Time Elapsed: " + erfElapsedTime/1000.0 + " Sec.]");
 
+		    if(eqRup == null)
+		    {
+		    	System.err.println(ErrorCode.INVALID_ERF);
+		    	System.exit(ErrorCode.INVALID_ERF.getCode());
+		    }
+		    
 			double magnitude = eqRup.getMag();
 			double averageDip = eqRup.getRuptureSurface().getAveDip();
 			double averageRake = eqRup.getAveRake();
+			
+			ProbEqkRupture probEqRup = (ProbEqkRupture)eqRup;
+			double probability = probEqRup.getProbability();
+			
+			double meanAnnualRate = probEqRup.getMeanAnnualRate(timeSpan.getDuration());
 			
 			ArrayList<RuptureLocation> eqRupSurface = new ArrayList<RuptureLocation>();
 			RuptureSurface surface = eqRup.getRuptureSurface();
@@ -201,13 +277,17 @@ public class EQHazardCalc implements ParameterChangeWarningListener {
 			}
 			
 			if(eqRupSurface.isEmpty())
-				eqRupCfg.SetRupture(magnitude, averageDip, averageRake, null);
+				eqRupCfg.SetRupture(magnitude, averageDip, averageRake, probability, meanAnnualRate, null);
 			else
-				eqRupCfg.SetRupture(magnitude, averageDip, averageRake, eqRupSurface);
+				eqRupCfg.SetRupture(magnitude, averageDip, averageRake, probability, meanAnnualRate, eqRupSurface);
 
 		}
 		
 		imr.setEqkRupture(eqRup);
+		Map<String, Object> imrParams = GMPECfg.Parameters();
+		if(imrParams != null)
+			for (Map.Entry<String,Object> param : imrParams.entrySet())
+				imr.getParameter(param.getKey()).setValue(param.getValue());
 		
 		//Get a list of sites locations ready
 		SiteConfig siteCfg = scenarioConfig.GetSiteConfig();
@@ -252,11 +332,14 @@ public class EQHazardCalc implements ParameterChangeWarningListener {
 		//First we need to find the type of IM
 		boolean isSANeeded = false;
 		boolean isPGANeeded = false;
+		boolean isPGVNeeded = false;
+
 
 		if(imConfig.Type().equalsIgnoreCase("SA"))
 		{
 			isSANeeded = true;
 			isPGANeeded = false;
+			isPGVNeeded = false;
 
 			output = new SHAOutput(siteSpecs.size(), imConfig.Periods(), scenarioConfig.GetRuptureConfig());
 		}
@@ -265,12 +348,21 @@ public class EQHazardCalc implements ParameterChangeWarningListener {
 			output = new SHAOutput(siteSpecs.size(), null, scenarioConfig.GetRuptureConfig());
 			isSANeeded = false;
 			isPGANeeded = true;
+			isPGVNeeded = false;
+		}
+		else if(imConfig.Type().equalsIgnoreCase("PGV"))
+		{
+			output = new SHAOutput(siteSpecs.size(), null, scenarioConfig.GetRuptureConfig());
+			isSANeeded = false;
+			isPGANeeded = false;
+			isPGVNeeded = true;
 		}
 		else if(imConfig.Type().equalsIgnoreCase("All"))
 		{
 			output = new SHAOutput(siteSpecs.size(), imConfig.Periods(), scenarioConfig.GetRuptureConfig());
 			isSANeeded = true;
 			isPGANeeded = true;
+			isPGVNeeded = true;
 		}
 		else
 		{
@@ -348,6 +440,42 @@ public class EQHazardCalc implements ParameterChangeWarningListener {
 					siteDataResults.add(new SiteDataResult(newParam.getName(),
 								newParam.getValue(), provider));
 				}
+				else if(newParam.getName().equalsIgnoreCase(ZhaoEtAl_2006_AttenRel.SITE_TYPE_NAME))
+				{
+					Vs30_Param vs30param = new Vs30_Param();
+					boolean vs30Found = siteTrans.setParameterValue(vs30param, siteDataValues);
+					if(vs30Found)
+					{
+						double vs30 = vs30param.getValue();
+						if(vs30 > 1100)
+							newParam.setValue(ZhaoEtAl_2006_AttenRel.SITE_TYPE_HARD_ROCK);
+						
+						else if(vs30 > 600)
+							newParam.setValue(ZhaoEtAl_2006_AttenRel.SITE_TYPE_ROCK);
+						
+						else if(vs30 > 300)
+							newParam.setValue(ZhaoEtAl_2006_AttenRel.SITE_TYPE_HARD_SOIL);
+						
+						else if(vs30 > 200)
+							newParam.setValue(ZhaoEtAl_2006_AttenRel.SITE_TYPE_MEDIUM_SOIL);
+						
+						else
+							newParam.setValue(ZhaoEtAl_2006_AttenRel.SITE_TYPE_SOFT_SOIL);
+
+					}
+					else
+						newParam.setValue(ZhaoEtAl_2006_AttenRel.SITE_TYPE_DEFAULT);
+					
+					String provider = "Unknown"; 
+
+					provider = getDataSource(vs30param.getName(), siteDataValues);
+					
+					siteDataResults.add(new SiteDataResult(vs30param.getName(),
+							vs30param.getValue(), provider));
+					
+					siteDataResults.add(new SiteDataResult(newParam.getName(),
+							newParam.getValue(), "Mapped from Vs30"));
+				}				
 				else 
 				{
 					newParam.setValue(siteParam.getDefaultValue());
@@ -358,16 +486,25 @@ public class EQHazardCalc implements ParameterChangeWarningListener {
 			}
 
 			imr.setSite(site);
-		      
-			StdDevTypeParam stdDevParam = (StdDevTypeParam)imr.getParameter(StdDevTypeParam.NAME);
 			
-			boolean hasIEStats = stdDevParam.isAllowed(StdDevTypeParam.STD_DEV_TYPE_INTER) &&
-					stdDevParam.isAllowed(StdDevTypeParam.STD_DEV_TYPE_INTRA);
-			
+			boolean hasIEStats = false;
+			StdDevTypeParam stdDevParam = null;
+			try
+			{
+				stdDevParam = (StdDevTypeParam)imr.getParameter(StdDevTypeParam.NAME);
+				
+				hasIEStats = stdDevParam.isAllowed(StdDevTypeParam.STD_DEV_TYPE_INTER) &&
+						stdDevParam.isAllowed(StdDevTypeParam.STD_DEV_TYPE_INTRA);
+			}
+			catch(ParameterException e)
+			{
+				hasIEStats = false;
+			}
 			double[] periods = imConfig.Periods();
 			
 			PGAResult pgaResult = null;
 			SAResult saResult = null;
+			PGVResult pgvResult = null;
 			if(isSANeeded)
 			{	
 				imr.setIntensityMeasure("SA");
@@ -379,7 +516,8 @@ public class EQHazardCalc implements ParameterChangeWarningListener {
 				{
 					imtParam.getIndependentParameter(PeriodParam.NAME).setValue(periods[j]);
 					double mean = imr.getMean();
-					stdDevParam.setValue(StdDevTypeParam.STD_DEV_TYPE_TOTAL);
+					if(null != stdDevParam)
+						stdDevParam.setValue(StdDevTypeParam.STD_DEV_TYPE_TOTAL);
 					double stdDev = imr.getStdDev();
 					
 					if(hasIEStats)
@@ -402,7 +540,8 @@ public class EQHazardCalc implements ParameterChangeWarningListener {
 				imr.setIntensityMeasure("PGA");
 
 				double mean = imr.getMean();
-				stdDevParam.setValue(StdDevTypeParam.STD_DEV_TYPE_TOTAL);
+				if(null != stdDevParam)
+					stdDevParam.setValue(StdDevTypeParam.STD_DEV_TYPE_TOTAL);
 				double stdDev = imr.getStdDev();					
 				
 				if(hasIEStats)
@@ -419,16 +558,204 @@ public class EQHazardCalc implements ParameterChangeWarningListener {
 				}
 			}
 			
+			if(isPGVNeeded)
+			{
+				imr.setIntensityMeasure("PGV");
+
+				double mean = imr.getMean();
+				if(null != stdDevParam)
+					stdDevParam.setValue(StdDevTypeParam.STD_DEV_TYPE_TOTAL);
+				double stdDev = imr.getStdDev();					
+				
+				if(hasIEStats)
+				{
+					stdDevParam.setValue(StdDevTypeParam.STD_DEV_TYPE_INTER);
+					double interEvStdDev = imr.getStdDev();
+					stdDevParam.setValue(StdDevTypeParam.STD_DEV_TYPE_INTRA);
+					double intraEvStdDev = imr.getStdDev();
+					pgvResult = new PGVResult(mean, stdDev, interEvStdDev, intraEvStdDev);
+				}
+				else
+				{
+					pgvResult = new PGVResult(mean, stdDev);
+				}
+			}
+			
 			if(siteDataValues.isEmpty())
-				result = new SiteResult(siteLocation, null, pgaResult, saResult);
+				result = new SiteResult(siteLocation, null, pgaResult, saResult, pgvResult);
 			else
-				result = new SiteResult(siteLocation, siteDataResults, pgaResult, saResult);
+				result = new SiteResult(siteLocation, siteDataResults, pgaResult, saResult, pgvResult);
 			
 			output.SetResult(i, result);
 		}
 		long stopTime = System.currentTimeMillis();
 	    long elapsedTime = stopTime - startTime;
 	    System.out.println(", Done! Time Elapsed: " + elapsedTime/1000.0 + " Sec.");
+	}
+	
+	
+	public void ComputeUHS(EQHazardConfig config)
+	{
+		GMPEConfig GMPECfg = config.GetGMPEConfig();
+		ScalarIMR imr = CreateIMRInstance(GMPECfg.Type());
+		ParameterList ims =imr.getSupportedIntensityMeasures();
+		SA_Param saParam = (SA_Param)ims.getParameter(SA_Param.NAME);
+		List<Double> supportedPeriods = saParam.getPeriodParam().getAllowedDoubles();
+		Collections.sort(supportedPeriods);	
+
+
+		SiteLocation siteLocation = config.GetSiteConfig().Location();
+		Location location = new Location (siteLocation.Latitude(), siteLocation.Longitude());
+		Site site = new Site(location);
+		
+		System.out.print("Obtaining Site Data...");
+		long sdStartTime = System.currentTimeMillis();
+		ArrayList<SiteDataValue<?>> availableSiteData = null;
+		try {
+			availableSiteData = siteDataProviders.getAllAvailableData(location);
+		} catch (Exception e) {
+			e.printStackTrace();
+			return;
+		}
+		long sdStopTime = System.currentTimeMillis();
+	    long sdElapsedTime = sdStopTime - sdStartTime;
+	    System.out.println("[Time Elapsed: " + sdElapsedTime/1000.0 + " Sec.]");
+		
+	    System.out.print("Processing Rupture Forecast...");
+		long erfStartTime = System.currentTimeMillis();
+		EqRuptureConfig eqRupCfg = config.GetRuptureConfig();
+		ERF erf = getERF(eqRupCfg.RuptureForecast());
+		ParameterList erfParams = erf.getAdjustableParameterList();
+		erfParams.setValue("Background Seismicity", "Exclude");
+		long erfStopTime = System.currentTimeMillis();
+	    long erfElapsedTime = erfStopTime - erfStartTime;
+		System.out.println("[Time Elapsed: " + erfElapsedTime/1000.0 + " Sec.]");
+		
+		ParameterList imrSiteParams = imr.getSiteParams();
+		ArrayList<SiteDataResult> siteDataResults = new ArrayList<SiteDataResult>();
+		SiteTranslator siteTrans = new SiteTranslator();
+		
+		SiteSpec siteSpec = new SiteSpec(siteLocation);
+		for(Parameter siteParam:imrSiteParams)
+		{	
+			Parameter newParam = (Parameter)siteParam.clone();
+			//checking if a provider has the value, otherwise set the default
+			boolean siteDataFound = siteTrans.setParameterValue(newParam, availableSiteData);
+
+			if(newParam.getName().equalsIgnoreCase("Vs30") && siteSpec.hasVs30())
+			{
+				newParam.setValue(siteSpec.Vs30().doubleValue());
+				siteDataResults.add(new SiteDataResult(newParam.getName(),
+								newParam.getValue(), "User Defined"));
+			}
+			else if(newParam.getName().equalsIgnoreCase("Vs30 Type") && siteSpec.hasVs30())
+			{
+				newParam.setValue("Measured");
+				siteDataResults.add(new SiteDataResult(newParam.getName(),
+								newParam.getValue(), "User Defined"));
+			}
+			else if(siteDataFound)
+			{
+				String provider = "Unknown";
+
+				provider = getDataSource(newParam.getName(), availableSiteData);
+				
+				siteDataResults.add(new SiteDataResult(newParam.getName(),
+							newParam.getValue(), provider));
+			}
+			else 
+			{
+				newParam.setValue(siteParam.getDefaultValue());
+				siteDataResults.add(new SiteDataResult(siteParam.getName(),
+						siteParam.getDefaultValue(), "Default"));
+			}
+			site.addParameter(newParam);
+		}
+		
+		SpectrumCalculatorAPI spectrumCalc = new SpectrumCalculator();
+		IMT_Info imtInfo = new IMT_Info();
+		
+		DiscretizedFunc hazFunction = imtInfo.getDefaultHazardCurve(SA_Param.NAME);
+		imr.setIntensityMeasure("SA");
+		double[] periods = new double [supportedPeriods.size()];
+		for (int i = 0; i < supportedPeriods.size(); i++)
+			periods[i] = supportedPeriods.get(i);
+		output = new SHAOutput(1, periods, config.GetRuptureConfig());
+		
+		Thread calcThread = new Thread(new Runnable(){
+			
+			public void run()
+			{
+				DiscretizedFunc spectrum = null;
+
+				try
+				{
+					spectrum = spectrumCalc.getIML_SpectrumCurve(hazFunction, site, imr, erf, config.GetIMConfig().getExceedanceProb(), supportedPeriods);
+				}
+				catch (RuntimeException e) {
+					e.printStackTrace();
+					return;
+				}
+				catch(Exception e)
+				{
+					System.out.print(e.getMessage());
+				}
+				
+				synchronized (output) {
+					SAResult saResult = new SAResult();
+					double[] UHS = new double [spectrum.size()];
+					for (int i = 0; i < spectrum.size(); i++)
+						UHS[i] = Math.log(spectrum.getY(i));
+					saResult.SetUHS(UHS);
+					SiteResult siteResult = new SiteResult(siteLocation, null, null, saResult, null);
+					output.SetResult(0, siteResult);
+				}
+			}});
+		
+		calcThread.setName("PSHA-thread");
+		calcThread.start();
+		
+		long shaStartTime = System.currentTimeMillis();
+		while(calcThread.isAlive())
+		{
+			try
+			{
+				Thread.sleep(200);
+			}
+			catch (Exception e)
+			{
+				
+			}
+			int current = Math.max(0, spectrumCalc.getCurrRuptures());
+			double percent = (double)current/spectrumCalc.getTotRuptures() * 100;
+			System.out.printf("\rProcessing Rupture %d of %d [%.1f %% Done]", current, spectrumCalc.getTotRuptures(), percent);
+		}
+		long shaStopTime = System.currentTimeMillis();
+	    long shaElapsedTime = shaStopTime - shaStartTime;
+		System.out.println("...[Time Elapsed: " + shaElapsedTime/1000.0 + " Sec.]");
+		
+		HazardCurveCalculatorAPI hazCurveCalc = new HazardCurveCalculator();
+		ArrayList<HazardCurvesResult> hcResults = new ArrayList<HazardCurvesResult>();		
+
+		for (int i = 0; i < supportedPeriods.size(); i++)
+		{
+			DiscretizedFunc hazardCurve = new ArbitrarilyDiscretizedFunc();
+			for (Point2D pt : hazFunction)
+				hazardCurve.set(Math.log(pt.getX()), 0d); // y-value doesn't matter here yet
+			
+			SA_Param.setPeriodInSA_Param(imr.getIntensityMeasure(), supportedPeriods.get(i));
+			hazCurveCalc.getHazardCurve(hazardCurve, site, imr, erf);
+			
+	
+			HazardCurvesResult hcResult = new HazardCurvesResult();
+			hcResult.setCurve(hazardCurve.xValues().toArray(Double[]::new), hazardCurve.yValues().toArray(Double[]::new));
+			hcResults.add(hcResult);
+			hcResult.setIM(imr.getIntensityMeasure().getName());
+			hcResult.setPeriod(supportedPeriods.get(i));
+			System.out.println("Processing Hazard Curve for SA at period " + supportedPeriods.get(i));
+		}
+		output.GetResult(0).setHazardCurves(hcResults);
+		
 	}
 	
 	private void WriteOutputs(EQHazardConfig scenarioConfig, String directory, String file)
@@ -472,6 +799,9 @@ public class EQHazardCalc implements ParameterChangeWarningListener {
 					}
 				}
 				
+				if(null != result.PGV())
+					feature.AddProperty("MeanPGV", result.PGV().Mean());
+				
 				if(null != result.SiteData())
 				{
 					for(SiteDataResult data:result.SiteData())
@@ -496,17 +826,42 @@ public class EQHazardCalc implements ParameterChangeWarningListener {
 	{
 		//These classes will be instantiated using reflection
 		try 
-		{	
+		{				
+			AttenuationRelationship imr = null;
+
+			if (!imrMap.containsKey(type))
+			{
+				System.err.println("Failed to find IMR with the name " + type + "!");
+				return imr;
+			}
+				
 			String imrClassName = imrMap.get(type);
-			Class listenerClass = ParameterChangeWarningListener.class;
-			Object[] paramObjects = new Object[] {this};
-			Class[] params = new Class[] {listenerClass};
+
 			Class imrClass = Class.forName(imrClassName);
-			Constructor ctor = imrClass.getConstructor(params);
-			AttenuationRelationship imr = (AttenuationRelationship) ctor.newInstance(paramObjects);
+			
+			Constructor ctor;
+			
+			if(!type.startsWith("NSHMP"))
+			{
+				Class listenerClass = ParameterChangeWarningListener.class;
+				Object[] paramObjects = new Object[] {this};
+				Class[] params = new Class[] {listenerClass};
+				ctor = imrClass.getConstructor(params);
+				imr = (AttenuationRelationship) ctor.newInstance(paramObjects);
+			}
+			else
+			{
+				ctor = imrClass.getConstructor();
+				imr = (AttenuationRelationship) ctor.newInstance();
+			}
+			
 			
 			//setting the Attenuation with the default parameters
 			imr.setParamDefaults();
+			
+			if(type.endsWith("Intraslab"))
+				imr.getParameter(TectonicRegionTypeParam.NAME).setValue(TectonicRegionType.SUBDUCTION_SLAB.toString());
+
 			return imr;
 		}
 		catch (ClassCastException e) {
@@ -565,12 +920,15 @@ public class EQHazardCalc implements ParameterChangeWarningListener {
 	
 	ERF getERF(String erfName)
 	{
+		return getERF(erfName, true);
+	}
+	
+	ERF getERF(String erfName, boolean withUpdate)
+	{
 		ERF erf = null;
 		switch (erfName) {
 		case "WGCEP (2007) UCERF2 - Single Branch":
 			erf = new MeanUCERF2();
-			erf.getAdjustableParameterList().getParameter(
-					UCERF2.PROB_MODEL_PARAM_NAME).setValue(UCERF2.PROB_MODEL_POISSON);
 			break;
 
 		case "USGS/CGS 2002 Adj. Cal. ERF":
@@ -579,8 +937,6 @@ public class EQHazardCalc implements ParameterChangeWarningListener {
 			
 		case "WGCEP UCERF 1.0 (2005)":
 			erf = new WGCEP_UCERF1_EqkRupForecast();
-			erf.getAdjustableParameterList().getParameter(
-					WGCEP_UCERF1_EqkRupForecast.TIME_DEPENDENT_PARAM_NAME).setValue(new Boolean(false));
 			break;
 			
 		case "GEM1 CEUS ERF":
@@ -594,30 +950,29 @@ public class EQHazardCalc implements ParameterChangeWarningListener {
 		case "Mean UCERF3":
 			MeanUCERF3 forecast = new MeanUCERF3();
 			forecast.setPreset(MeanUCERF3.Presets.BOTH_FM_BRANCH_AVG);
-			forecast.setParameter(ProbabilityModelParam.NAME, ProbabilityModelOptions.POISSON);
 			erf = forecast;
 			break;
 			
 		case "Mean UCERF3 FM3.1":
 			MeanUCERF3 forecast31 = new MeanUCERF3();
 			forecast31.setPreset(MeanUCERF3.Presets.FM3_1_BRANCH_AVG);
-			forecast31.setParameter(ProbabilityModelParam.NAME, ProbabilityModelOptions.POISSON);
 			erf = forecast31;
 			break;
 			
 		case "Mean UCERF3 FM3.2":
 			MeanUCERF3 forecast32 = new MeanUCERF3();
 			forecast32.setPreset(MeanUCERF3.Presets.FM3_2_BRANCH_AVG);
-			forecast32.setParameter(ProbabilityModelParam.NAME, ProbabilityModelOptions.POISSON);
 			erf = forecast32;
 			break;
+			
+		case "WGCEP Eqk Rate Model 2 ERF":
+			erf = new UCERF2();
 			
 		default:
 			break;
 		}
 		
-		erf.getTimeSpan().setDuration(1.0);
-		if(null != erf)
+		if(null != erf && withUpdate)
 		{
 			erf.updateForecast();
 			return erf;
@@ -625,18 +980,32 @@ public class EQHazardCalc implements ParameterChangeWarningListener {
 		
 		return erf;//We failed to find the earthquake rupture forecast
 	}
+	ProbEqkRupture getEqRuptureFromERF(EqRuptureConfig eqRupConfig)
+	{
+		return getEqRuptureFromERF(eqRupConfig, null);
+	}
 	
-	EqkRupture getEqRuptureFromERF(EqRuptureConfig eqRupConfig)
+	ProbEqkRupture getEqRuptureFromERF(EqRuptureConfig eqRupConfig, TimeSpan timeSpan)
 	{
 		ERF erf = getERF(eqRupConfig.RuptureForecast());		
 		
 		if(null != erf)
 		{
+			Map<String, Object> erfParams = eqRupConfig.Parameters();
+			if(erfParams != null)
+				for (Map.Entry<String,Object> param : erfParams.entrySet())
+					erf.setParameter(param.getKey(), param.getValue());
+			
+			if(null != timeSpan)
+				timeSpan = erf.getTimeSpan();
+			
 			EqkSource eqSource = erf.getSource(eqRupConfig.SourceIndex());
 			eqSource.getName();
 			if(null != eqSource)
 				return eqSource.getRupture(eqRupConfig.RuptureIndex());
 		}
+		
+		System.err.println("Failed to process Earthquake Rupture Forecast!");
 		return null;//We failed to find the earthquake rupture
 	}	
 }
